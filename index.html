@@ -381,6 +381,15 @@ function initAudio() {
   masterGain = ctx.createGain();
   masterGain.connect(ctx.destination);
   masterGain.gain.value = 1.0;
+  // iOS suspends AudioContext even when created inside a user gesture
+  if (ctx.state === 'suspended') ctx.resume();
+}
+
+function decodeAudioCompat(arrayBuf) {
+  // Callback style — iOS WebKit doesn't reliably support Promise-based decodeAudioData
+  return new Promise((resolve, reject) => {
+    ctx.decodeAudioData(arrayBuf, resolve, reject);
+  });
 }
 
 async function loadAll() {
@@ -391,12 +400,12 @@ async function loadAll() {
       const res = await fetch(AUDIO_PATH + p.file);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const arrayBuf = await res.arrayBuffer();
-      buffers[p.name] = await ctx.decodeAudioData(arrayBuf);
+      buffers[p.name] = await decodeAudioCompat(arrayBuf);
       loaded++;
       statusEl.textContent = `loading ${loaded}/${PLANETS.length}`;
     } catch (e) {
       console.warn(`Could not load ${p.file}:`, e.message);
-      buffers[p.name] = null;  // mark as missing — won't crash
+      buffers[p.name] = null;
       loaded++;
       statusEl.textContent = `loading ${loaded}/${PLANETS.length}`;
     }
@@ -452,31 +461,39 @@ function pointerAngle(e, rect) {
   return Math.atan2(pt.clientY - cy, pt.clientX - cx);
 }
 
-dialOuter.addEventListener('pointerdown', e => {
+function onDragStart(e) {
   isDragging = true;
-  dialOuter.setPointerCapture(e.pointerId);
   lastPointerAngle = pointerAngle(e, dialOuter.getBoundingClientRect());
   e.preventDefault();
-});
+}
 
-dialOuter.addEventListener('pointermove', e => {
+function onDragMove(e) {
   if (!isDragging) return;
+  e.preventDefault();
   const angle = pointerAngle(e, dialOuter.getBoundingClientRect());
   let delta = angle - lastPointerAngle;
   if (delta >  Math.PI) delta -= Math.PI * 2;
   if (delta < -Math.PI) delta += Math.PI * 2;
   lastPointerAngle = angle;
-
   dialAngle += delta;
   currentT = Math.max(0, Math.min(1,
     dialAngle / (Math.PI * 2 * TOTAL_TURNS) + 0.5
   ));
-
   dialPip.style.transform = `translateX(-50%) rotate(${dialAngle}rad)`;
-});
+}
 
-dialOuter.addEventListener('pointerup',    () => { isDragging = false; });
-dialOuter.addEventListener('pointercancel',() => { isDragging = false; });
+function onDragEnd() { isDragging = false; }
+
+// Touch events (iOS Safari)
+dialOuter.addEventListener('touchstart',  onDragStart, { passive: false });
+dialOuter.addEventListener('touchmove',   onDragMove,  { passive: false });
+dialOuter.addEventListener('touchend',    onDragEnd);
+dialOuter.addEventListener('touchcancel', onDragEnd);
+
+// Mouse events (desktop)
+dialOuter.addEventListener('mousedown', onDragStart);
+document.addEventListener('mousemove',  onDragMove);
+document.addEventListener('mouseup',    onDragEnd);
 
 // ── BUILD TICK MARKS ─────────────────────────────────────────
 const tickContainer = document.getElementById('ticks');
@@ -612,6 +629,7 @@ document.getElementById('start-btn').addEventListener('click', async () => {
   screen.classList.add('hidden');
 
   initAudio();
+  await ctx.resume(); // belt-and-braces for iOS
   await loadAll();
 
   // Start at Earth (middle of the dial range)
