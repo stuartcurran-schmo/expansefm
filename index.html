@@ -491,7 +491,9 @@ function setStaticGain(value, rampTime = 0.12) {
   if (!staticGain) return;
   const g = staticGain.gain;
   g.cancelScheduledValues(ctx.currentTime);
-  g.linearRampToValueAtTime(value * 0.5, ctx.currentTime + rampTime);
+  // Square the value so static falls away quickly as signal rises,
+  // then cap at 0.2 so planet audio always dominates
+  g.linearRampToValueAtTime(Math.min(value * value * 0.2, 0.2), ctx.currentTime + rampTime);
 }
 
 // ── SATURN RINGS ─────────────────────────────────────────────
@@ -756,8 +758,10 @@ function renderFrame() {
     startPlanet(PLANETS[nextIdx].name);
   }
 
-  // Static noise — inverse of signal strength
-  setStaticGain(1 - sig);
+  // Static noise — squared inverse so it drops off fast as signal rises,
+  // and capped low enough that planet sounds always dominate
+  const staticLevel = Math.pow(1 - sig, 2.5) * 0.25;
+  setStaticGain(staticLevel);
 
   // Planet sphere A (primary)
   const s = planet.size;
