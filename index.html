@@ -28,7 +28,20 @@
     touch-action: none;
   }
 
-  /* ── START SCREEN ── */
+  #starfield {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* everything above the starfield */
+  #start-screen, #app, #debug { position: relative; z-index: 1; }
+  #start-screen { position: fixed; z-index: 100; }
+
+
   #start-screen {
     position: fixed;
     inset: 0;
@@ -271,6 +284,9 @@
 </head>
 <body>
 
+<!-- STARFIELD -->
+<canvas id="starfield"></canvas>
+
 <!-- START SCREEN -->
 <div id="start-screen">
   <h1>Solar Radio</h1>
@@ -282,7 +298,10 @@
 
   <div id="planet-display">
     <div class="planet-wrap" id="wrap-a">
-      <div class="planet-sphere" id="sphere-a"></div>
+      <div style="position:relative;display:flex;align-items:center;justify-content:center;">
+        <div class="planet-sphere" id="sphere-a"></div>
+        <canvas id="ring-canvas" style="position:absolute;pointer-events:none;"></canvas>
+      </div>
       <div class="planet-label" id="label-a"></div>
     </div>
     <div class="planet-wrap" id="wrap-b" style="opacity:0">
@@ -441,6 +460,110 @@ function stopAll() {
   });
 }
 
+// ── STATIC NOISE ─────────────────────────────────────────────
+let staticGain;
+
+function initStatic() {
+  // White noise via ScriptProcessor (widely supported incl. iOS)
+  const bufferSize = 2048;
+  const noiseNode  = ctx.createScriptProcessor(bufferSize, 1, 1);
+  noiseNode.onaudioprocess = e => {
+    const out = e.outputBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      out[i] = (Math.random() * 2 - 1) * 0.35;
+    }
+  };
+  // Bandpass filter to give it that AM radio character
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = 1800;
+  filter.Q.value = 0.6;
+
+  staticGain = ctx.createGain();
+  staticGain.gain.value = 0;
+
+  noiseNode.connect(filter);
+  filter.connect(staticGain);
+  staticGain.connect(masterGain);
+}
+
+function setStaticGain(value, rampTime = 0.12) {
+  if (!staticGain) return;
+  const g = staticGain.gain;
+  g.cancelScheduledValues(ctx.currentTime);
+  g.linearRampToValueAtTime(value * 0.5, ctx.currentTime + rampTime);
+}
+
+// ── SATURN RINGS ─────────────────────────────────────────────
+const ringCanvas = document.getElementById('ring-canvas');
+const rCtx       = ringCanvas.getContext('2d');
+
+function drawSaturnRings(planetDiameter, alpha, sphereColor) {
+  if (alpha < 0.01) {
+    rCtx.clearRect(0, 0, ringCanvas.width, ringCanvas.height);
+    ringCanvas.style.display = 'none';
+    return;
+  }
+  ringCanvas.style.display = '';
+
+  const r      = planetDiameter / 2;
+  const outerR = r * 2.2;
+  const yScale = 0.30;
+  const cW     = Math.ceil(outerR * 2 + 4);
+  const cH     = Math.ceil(outerR * yScale * 2 + planetDiameter + 4);
+
+  ringCanvas.width  = cW;
+  ringCanvas.height = cH;
+  ringCanvas.style.width    = cW + 'px';
+  ringCanvas.style.height   = cH + 'px';
+  ringCanvas.style.position = 'absolute';
+  ringCanvas.style.left     = `${-((cW - planetDiameter) / 2)}px`;
+  ringCanvas.style.top      = `${-((cH - planetDiameter) / 2)}px`;
+
+  rCtx.clearRect(0, 0, cW, cH);
+
+  const cx = cW / 2;
+  const cy = cH / 2;
+
+  const rings = [
+    { rMin: r * 1.22, rMax: r * 1.52, color: `rgba(215,198,155,${alpha * 0.60})` },
+    { rMin: r * 1.58, rMax: r * 1.88, color: `rgba(200,180,135,${alpha * 0.48})` },
+    { rMin: r * 1.94, rMax: r * 2.15, color: `rgba(178,162,120,${alpha * 0.32})` },
+  ];
+
+  // 1. Back half of rings
+  rings.forEach(ring => {
+    rCtx.beginPath();
+    rCtx.ellipse(cx, cy, ring.rMax, ring.rMax * yScale, 0, Math.PI, Math.PI * 2);
+    rCtx.ellipse(cx, cy, ring.rMin, ring.rMin * yScale, 0, Math.PI * 2, Math.PI, true);
+    rCtx.fillStyle = ring.color;
+    rCtx.fill();
+  });
+
+  // 2. Paint an opaque sphere disc on top of back rings — this is what actually
+  //    occludes them. Must match the sphere's gradient closely enough to be seamless.
+  const grad = rCtx.createRadialGradient(
+    cx - r * 0.25, cy - r * 0.30, r * 0.05,  // highlight offset
+    cx, cy, r
+  );
+  grad.addColorStop(0,   lighten(sphereColor));
+  grad.addColorStop(0.55, sphereColor);
+  grad.addColorStop(1,   '#060810');
+  rCtx.beginPath();
+  rCtx.arc(cx, cy, r - 0.5, 0, Math.PI * 2);
+  rCtx.fillStyle = grad;
+  rCtx.fill();
+
+  // 3. Front half of rings — drawn over the sphere disc
+  rings.forEach(ring => {
+    rCtx.beginPath();
+    rCtx.ellipse(cx, cy, ring.rMax, ring.rMax * yScale, 0, 0, Math.PI);
+    rCtx.ellipse(cx, cy, ring.rMin, ring.rMin * yScale, 0, Math.PI, 0, true);
+    rCtx.fillStyle = ring.color;
+    rCtx.fill();
+  });
+}
+
 // ── DIAL INTERACTION ─────────────────────────────────────────
 let dialAngle   = 0;  // cumulative radians
 let currentT    = 0;  // 0..1 position
@@ -476,6 +599,7 @@ function onDragMove(e) {
   if (delta < -Math.PI) delta += Math.PI * 2;
   lastPointerAngle = angle;
   dialAngle += delta;
+  dialVelocity = delta;  // feeds into starfield speed
   currentT = Math.max(0, Math.min(1,
     dialAngle / (Math.PI * 2 * TOTAL_TURNS) + 0.5
   ));
@@ -521,6 +645,68 @@ const cursor = document.createElement('div');
 cursor.id = 'strip-cursor';
 strip.appendChild(cursor);
 
+// ── STARFIELD ────────────────────────────────────────────────
+const sfCanvas = document.getElementById('starfield');
+const sfCtx    = sfCanvas.getContext('2d');
+let sfW = 0, sfH = 0;
+let dialVelocity = 0;  // tracks dial speed for star parallax
+
+function resizeStarfield() {
+  sfW = sfCanvas.width  = window.innerWidth;
+  sfH = sfCanvas.height = window.innerHeight;
+}
+resizeStarfield();
+window.addEventListener('resize', resizeStarfield);
+
+// Three depth layers — further stars move slower and are dimmer
+const STAR_LAYERS = [
+  { count: 60,  speed: 0.12, minR: 0.3, maxR: 0.8,  minA: 0.15, maxA: 0.35 },
+  { count: 50,  speed: 0.28, minR: 0.6, maxR: 1.2,  minA: 0.25, maxA: 0.55 },
+  { count: 25,  speed: 0.55, minR: 1.0, maxR: 1.8,  minA: 0.45, maxA: 0.80 },
+];
+
+const stars = [];
+STAR_LAYERS.forEach(layer => {
+  for (let i = 0; i < layer.count; i++) {
+    stars.push({
+      x:     Math.random() * 2000,  // oversized so wrap isn't obvious
+      y:     Math.random(),          // stored as 0-1, multiplied by sfH on draw
+      r:     layer.minR + Math.random() * (layer.maxR - layer.minR),
+      alpha: layer.minA + Math.random() * (layer.maxA - layer.minA),
+      speed: layer.speed,
+      // subtle twinkle
+      twinkleOffset: Math.random() * Math.PI * 2,
+      twinkleSpeed:  0.003 + Math.random() * 0.008,
+    });
+  }
+});
+
+let sfFrame = 0;
+
+function drawStarfield() {
+  sfCtx.clearRect(0, 0, sfW, sfH);
+  sfFrame++;
+
+  // Base drift + extra kick from dial movement
+  const drift = 0.4 + Math.abs(dialVelocity) * 6;
+
+  stars.forEach(s => {
+    s.x -= s.speed * drift;
+    if (s.x < -2) s.x += sfW + 4;
+
+    const twinkle = 0.85 + 0.15 * Math.sin(sfFrame * s.twinkleSpeed + s.twinkleOffset);
+    const a = s.alpha * twinkle;
+
+    sfCtx.beginPath();
+    sfCtx.arc(s.x % sfW, s.y * sfH, s.r, 0, Math.PI * 2);
+    sfCtx.fillStyle = `rgba(255,255,255,${a.toFixed(2)})`;
+    sfCtx.fill();
+  });
+
+  // Decay dial velocity
+  dialVelocity *= 0.88;
+}
+
 // ── RENDER LOOP ───────────────────────────────────────────────
 const sphereA     = document.getElementById('sphere-a');
 const labelA      = document.getElementById('label-a');
@@ -535,7 +721,11 @@ const debugEl     = document.getElementById('debug');
 let lastPrimaryIdx = -1;
 
 function renderFrame() {
-  animT += (currentT - animT) * 0.1;
+  drawStarfield();
+  // Clamp lerp so animT never overshoots currentT — prevents flick-back artefact
+  const diff = currentT - animT;
+  const step = diff * 0.1;
+  animT += Math.abs(step) < Math.abs(diff) ? step : diff;
 
   const idx = getPlanetIdx(animT);
   const planet = PLANETS[idx];
@@ -566,6 +756,9 @@ function renderFrame() {
     startPlanet(PLANETS[nextIdx].name);
   }
 
+  // Static noise — inverse of signal strength
+  setStaticGain(1 - sig);
+
   // Planet sphere A (primary)
   const s = planet.size;
   sphereA.style.width  = s + 'px';
@@ -574,6 +767,15 @@ function renderFrame() {
   labelA.textContent = planet.name;
   wrapA.style.opacity = sig;
   wrapA.style.transform = `scale(${0.85 + 0.15 * sig})`;
+
+  // Saturn rings — canvas paints both the rings AND the sphere itself
+  if (planet.name === 'Saturn') {
+    sphereA.style.opacity = '0'; // ring canvas repaints the sphere
+    drawSaturnRings(s, sig, planet.color);
+  } else {
+    sphereA.style.opacity = '1';
+    ringCanvas.style.display = 'none';
+  }
 
   // Planet sphere B (incoming)
   if (nextIdx >= 0 && nextIdx < PLANETS.length) {
@@ -631,6 +833,7 @@ document.getElementById('start-btn').addEventListener('click', async () => {
   initAudio();
   await ctx.resume(); // belt-and-braces for iOS
   await loadAll();
+  initStatic();
 
   // Start at Earth (middle of the dial range)
   const earthT = PLANETS.find(p => p.name === 'Earth').t;
